@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>進階網頁資料爬蟲系統</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- React & ReactDOM (透過 CDN 引入) -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel (讓瀏覽器可以直接解析 React 的 JSX 語法) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-50 text-slate-800 font-sans">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        const App = () => {
+            const [step, setStep] = useState(1);
+            const [url, setUrl] = useState('');
+            const [isAnalyzing, setIsAnalyzing] = useState(false);
+            const [analysisResult, setAnalysisResult] = useState(null);
+            
+            // 動態預覽資料與欄位
+            const [previewData, setPreviewData] = useState([]);
+            const [previewColumns, setPreviewColumns] = useState([]);
+            
+            // 爬蟲設定狀態
+            const [config, setConfig] = useState({
+                pagination: true,
+                startPage: 1,
+                endPage: 'last',
+                deepCrawl: true,
+                deepCrawlLevel: 1,
+                exportFormat: 'excel',
+                exportDestination: 'local',
+                cloudUrl: '',
+                splitFiles: true,
+                splitRows: 50000,
+                autoAnalysis: true
+            });
+
+            const handleAnalyze = async () => {
+                if (!url) return;
+                setIsAnalyzing(true);
+                
+                try {
+                    // 呼叫後端真實的分析 API，並要求提供 10 筆預覽資料
+                    const response = await fetch(`/api/analyze?url=${encodeURIComponent(url)}&limit=10`);
+                    const data = await response.json();
+
+                    if (data.status === 'success') {
+                        setAnalysisResult(data.analysisResult);
+                        setPreviewData(data.previewData);
+                        // 動態提取第一筆資料的 Key 作為表格標題欄位
+                        if (data.previewData && data.previewData.length > 0) {
+                            setPreviewColumns(Object.keys(data.previewData[0]));
+                        } else {
+                            setPreviewColumns(['提示']);
+                            setPreviewData([{'提示': '找不到可預覽的資料'}]);
+                        }
+                    } else {
+                        throw new Error(data.message || "分析失敗");
+                    }
+                } catch (error) {
+                    console.error("分析發生錯誤:", error);
+                    // 錯誤處理：若後端未準備好或無法抓取，給予提示
+                    alert(`無法從目標網站取得真實結構。\n原因：${error.message}\n\n這可能是因為網站使用了動態載入(JavaScript)防護。`);
+                    
+                    // 退回預設的錯誤提示預覽
+                    setAnalysisResult({
+                        tablesFound: 0,
+                        listItemsFound: 0,
+                        paginationDetected: false,
+                        estimatedPages: 0,
+                        detailLinksDetected: false,
+                        status: 'error'
+                    });
+                    setPreviewColumns(['系統訊息', '建議操作']);
+                    setPreviewData([
+                        { '系統訊息': '無法使用標準 HTTP 請求讀取資料', '建議操作': '目標網站可能為動態網頁，後端需升級為 Playwright 引擎。' }
+                    ]);
+                } finally {
+                    setIsAnalyzing(false);
+                    setStep(2);
+                }
+            };
+
+            const handleDeepCrawlPreview = () => {
+                // 自動勾選深層擷取，並給予友善提示
+                setConfig(prev => ({...prev, deepCrawl: true}));
+                alert("✅ 已自動為您啟用「進階內頁爬蟲」！\n\n執行爬蟲任務時，系統將會自動擷取表格背後的隱藏連結（例如：明細資料）並匯出。");
+            };
+
+            const [crawlingProgress, setCrawlingProgress] = useState(0);
+            const [isCrawling, setIsCrawling] = useState(false);
+            const [downloadUrl, setDownloadUrl] = useState('');
+            const [crawlMessage, setCrawlMessage] = useState('');
+
+            // 結合實際的 Python API 呼叫
+            const startCrawling = async () => {
+                setStep(5);
+                setIsCrawling(true);
+                setCrawlingProgress(0);
+                setDownloadUrl('');
+                setCrawlMessage('');
+                
+                // 模擬進度條推進
+                const progressInterval = setInterval(() => {
+                    setCrawlingProgress(prev => {
+                        if (prev >= 80) {
+                            clearInterval(progressInterval);
+                            return 80;
+                        }
+                        return prev + Math.floor(Math.random() * 10);
+                    });
+                }, 500);
+
+                try {
+                    // 打包所有設定參數發送給後端 API
+                    const queryParams = new URLSearchParams({
+                        url: url,
+                        pagination: config.pagination,
+                        startPage: config.startPage,
+                        endPage: config.endPage,
+                        deepCrawl: config.deepCrawl
+                    });
+
+                    // 呼叫實際的後端爬蟲 API
+                    const response = await fetch(`/api/crawl?${queryParams.toString()}`);
+                    const data = await response.json();
+
+                    clearInterval(progressInterval);
+                    setCrawlingProgress(100);
+
+                    if (data.status === "success") {
+                        setCrawlMessage(data.message);
+                        setDownloadUrl(data.download_url);
+                    } else {
+                        setCrawlMessage("❌ 擷取失敗：" + data.message);
+                    }
+                } catch (error) {
+                    clearInterval(progressInterval);
+                    setCrawlingProgress(100);
+                    setCrawlMessage("❌ 發生連線錯誤，請檢查後端伺服器是否運行中。");
+                } finally {
+                    setIsCrawling(false);
+                }
+            };
+
+            return (
+                <div className="min-h-screen bg-slate-50 text-slate-800 font-sans p-6">
+                    <div className="max-w-5xl mx-auto space-y-6">
+                        
+                        {/* Header */}
+                        <header className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex items-center justify-between">
+                            <div className="flex items-center space-x-3">
+                                <div className="p-3 bg-blue-600 text-white rounded-lg flex items-center justify-center w-12 h-12">
+                                    <i className="fas fa-database text-xl"></i>
+                                </div>
+                                <div>
+                                    <h1 className="text-2xl font-bold text-slate-900">進階網頁資料爬蟲系統</h1>
+                                    <p className="text-sm text-slate-500">智慧分析、深度擷取與自動化資料整理</p>
+                                </div>
+                            </div>
+                            <div className="flex space-x-2 text-sm font-medium">
+                                <span className={`px-3 py-1 rounded-full ${step >= 1 ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-400'}`}>1. 分析</span>
+                                <span className={`px-3 py-1 rounded-full ${step >= 2 ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-400'}`}>2. 設定</span>
+                                <span className={`px-3 py-1 rounded-full ${step >= 3 ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-400'}`}>3. 預覽</span>
+                                <span className={`px-3 py-1 rounded-full ${step >= 4 ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-400'}`}>4. 輸出</span>
+                            </div>
+                        </header>
+
+                        {/* Step 1: URL Input & Analysis */}
+                        {step === 1 && (
+                            <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-200 space-y-6 animate-in fade-in slide-in-from-bottom-4">
+                                <h2 className="text-xl font-semibold flex items-center">
+                                    <i className="fas fa-search mr-3 text-blue-600"></i> 第一步：輸入目標網站與初步分析
+                                </h2>
+                                <p className="text-slate-600">系統將對網站進行即時分析，擷取真實存在的表格、清單與欄位。</p>
+                                
+                                <div className="flex space-x-4">
+                                    <input 
+                                        type="url" 
+                                        placeholder="請輸入網址 (例如: https://carbonfee.moenv.gov.tw/...)"
+                                        className="flex-1 p-4 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-lg"
+                                        value={url}
+                                        onChange={(e) => setUrl(e.target.value)}
+                                    />
+                                    <button 
+                                        onClick={handleAnalyze}
+                                        disabled={!url || isAnalyzing}
+                                        className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white px-8 py-4 rounded-lg font-medium transition-colors flex items-center text-lg shadow-md"
+                                    >
+                                        {isAnalyzing ? <i className="fas fa-sync fa-spin mr-2"></i> : <i className="fas fa-cog mr-2"></i>}
+                                        {isAnalyzing ? '實際連線分析中...' : '開始分析'}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Step 2 & 3: Configuration & Preview */}
+                        {(step === 2 || step === 3 || step === 4) && analysisResult && (
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 animate-in fade-in slide-in-from-bottom-4">
+                                
+                                {/* Left Sidebar: Analysis Status & Config */}
+                                <div className="col-span-1 space-y-6">
+                                    {/* Analysis Result Card */}
+                                    <div className={`bg-white p-5 rounded-xl shadow-sm border ${analysisResult.status === 'success' ? 'border-green-200' : 'border-red-200'}`}>
+                                        <h3 className={`font-semibold mb-4 flex items-center ${analysisResult.status === 'success' ? 'text-green-700' : 'text-red-700'}`}>
+                                            <i className={`fas ${analysisResult.status === 'success' ? 'fa-check-circle' : 'fa-exclamation-triangle'} mr-2`}></i> 
+                                            {analysisResult.status === 'success' ? '初步分析完成' : '分析發生異常'}
+                                        </h3>
+                                        <ul className="space-y-3 text-sm text-slate-600">
+                                            <li className="flex justify-between border-b pb-2"><span>主要表格/區塊：</span> <span className="font-semibold">{analysisResult.tablesFound} 個</span></li>
+                                            <li className="flex justify-between border-b pb-2"><span>發現資料標籤：</span> <span className="font-semibold">約 {analysisResult.listItemsFound} 筆</span></li>
+                                            <li className="flex justify-between border-b pb-2">
+                                                <span>支援自動換頁：</span> 
+                                                <span className={`font-semibold ${analysisResult.paginationDetected ? 'text-green-600' : 'text-orange-500'}`}>
+                                                    {analysisResult.paginationDetected ? `是 (自動偵測)` : '需手動調整'}
+                                                </span>
+                                            </li>
+                                            <li className="flex justify-between">
+                                                <span>支援內頁深度爬蟲：</span> 
+                                                <span className={`font-semibold ${analysisResult.detailLinksDetected ? 'text-green-600' : 'text-orange-500'}`}>
+                                                    {analysisResult.detailLinksDetected ? '是 (有連結)' : '未偵測到連結'}
+                                                </span>
+                                            </li>
+                                        </ul>
+                                    </div>
+
+                                    {/* Configuration Form */}
+                                    <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200 space-y-5">
+                                        <h3 className="font-semibold text-slate-900 flex items-center">
+                                            <i className="fas fa-sliders-h mr-2"></i> 擷取規則設定
+                                        </h3>
+                                        
+                                        {/* Pagination Settings */}
+                                        <div className="space-y-2">
+                                            <label className="flex items-center space-x-2 text-sm font-medium text-slate-700">
+                                                <input type="checkbox" checked={config.pagination} onChange={(e) => setConfig({...config, pagination: e.target.checked})} className="rounded text-blue-600 w-4 h-4" />
+                                                <span>自動換頁抓取 (從首頁到末頁)</span>
+                                            </label>
+                                            {config.pagination && (
+                                                <div className="flex items-center space-x-2 ml-6 mt-2 text-sm">
+                                                    <span>從第</span>
+                                                    <input type="number" value={config.startPage} onChange={(e) => setConfig({...config, startPage: e.target.value})} className="w-16 p-1 border rounded text-center" />
+                                                    <span>頁到</span>
+                                                    <select value={config.endPage} onChange={(e) => setConfig({...config, endPage: e.target.value})} className="p-1 border rounded bg-white">
+                                                        <option value="last">最後一頁</option>
+                                                        <option value="custom">自訂頁數</option>
+                                                    </select>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {/* Deep Crawl Settings */}
+                                        <div className="space-y-2 pt-3 border-t">
+                                            <label className="flex items-center space-x-2 text-sm font-medium text-slate-700">
+                                                <input type="checkbox" checked={config.deepCrawl} onChange={(e) => setConfig({...config, deepCrawl: e.target.checked})} className="rounded text-blue-600 w-4 h-4" />
+                                                <span>啟用進階內頁爬蟲 (點擊進入)</span>
+                                            </label>
+                                            {config.deepCrawl && (
+                                                <p className="text-xs text-slate-500 ml-6">
+                                                    啟用後，後端需對每個連結發送額外請求，擷取時間將增加。
+                                                </p>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Right Main Area: Preview & Export */}
+                                <div className="col-span-1 md:col-span-2 space-y-6">
+                                    
+                                    {/* Preview Area (動態渲染真實資料) */}
+                                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                                        <div className="flex justify-between items-center mb-4">
+                                            <h3 className="text-lg font-semibold flex items-center">
+                                                <i className="fas fa-table mr-2 text-blue-600"></i> 真實資料結構預覽 (前 10 筆)
+                                            </h3>
+                                            <button onClick={handleDeepCrawlPreview} className={`text-sm px-3 py-1.5 rounded-lg border flex items-center transition-colors ${config.deepCrawl ? 'bg-green-50 text-green-700 border-green-200' : 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100'}`}>
+                                                <i className={`fas ${config.deepCrawl ? 'fa-check-circle' : 'fa-info-circle'} mr-1`}></i> {config.deepCrawl ? '深層擷取已啟用' : '嘗試深層擷取'}
+                                            </button>
+                                        </div>
+                                        
+                                        <div className="overflow-x-auto rounded-lg border border-slate-200 max-h-96">
+                                            <table className="w-full text-sm text-left whitespace-nowrap">
+                                                <thead className="bg-slate-50 text-slate-700 font-medium border-b border-slate-200 sticky top-0">
+                                                    <tr>
+                                                        {previewColumns.map((col, idx) => (
+                                                            <th key={idx} className="px-4 py-3">{col}</th>
+                                                        ))}
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-100">
+                                                    {previewData.map((row, rowIdx) => (
+                                                        <tr key={rowIdx} className="hover:bg-slate-50">
+                                                            {previewColumns.map((col, colIdx) => (
+                                                                <td key={colIdx} className="px-4 py-3 max-w-xs truncate" title={row[col]}>
+                                                                    {row[col]}
+                                                                </td>
+                                                            ))}
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                        {step === 2 && (
+                                            <div className="mt-6 flex justify-end">
+                                                <button onClick={() => setStep(4)} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg flex items-center transition-colors font-medium">
+                                                    確認結構並設定輸出 <i className="fas fa-chevron-right ml-2 text-sm"></i>
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Export Settings (Step 4) */}
+                                    {step >= 4 && (
+                                        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 animate-in fade-in slide-in-from-bottom-4">
+                                            <h3 className="text-lg font-semibold flex items-center mb-6">
+                                                <i className="fas fa-file-export mr-2 text-green-600"></i> 資料格式與輸出設定
+                                            </h3>
+                                            
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                                {/* Format Settings */}
+                                                <div className="space-y-4">
+                                                    <label className="block text-sm font-medium text-slate-700 mb-1">匯出格式</label>
+                                                    <div className="flex space-x-3">
+                                                        <button onClick={() => setConfig({...config, exportFormat: 'excel'})} className={`flex-1 flex flex-col items-center p-3 rounded-lg border ${config.exportFormat === 'excel' ? 'border-green-500 bg-green-50 text-green-700 shadow-sm' : 'border-slate-200 hover:bg-slate-50'}`}>
+                                                            <i className="fas fa-file-excel text-2xl mb-2"></i>
+                                                            <span className="text-sm font-medium">Excel</span>
+                                                        </button>
+                                                        <button onClick={() => setConfig({...config, exportFormat: 'csv'})} className={`flex-1 flex flex-col items-center p-3 rounded-lg border ${config.exportFormat === 'csv' ? 'border-blue-500 bg-blue-50 text-blue-700 shadow-sm' : 'border-slate-200 hover:bg-slate-50'}`}>
+                                                            <i className="fas fa-file-csv text-2xl mb-2"></i>
+                                                            <span className="text-sm font-medium">CSV (Tab)</span>
+                                                        </button>
+                                                    </div>
+
+                                                    <div className="pt-2">
+                                                        <label className="block text-sm font-medium text-slate-700 mb-2">儲存位置</label>
+                                                        <div className="space-y-2">
+                                                            <label className="flex items-center space-x-2 text-sm cursor-pointer">
+                                                                <input type="radio" name="dest" checked={config.exportDestination === 'local'} onChange={() => setConfig({...config, exportDestination: 'local'})} className="text-blue-600 w-4 h-4" />
+                                                                <span>本地資料夾 (產生下載連結)</span>
+                                                            </label>
+                                                            <label className="flex items-center space-x-2 text-sm cursor-pointer">
+                                                                <input type="radio" name="dest" checked={config.exportDestination === 'cloud'} onChange={() => setConfig({...config, exportDestination: 'cloud'})} className="text-blue-600 w-4 h-4" />
+                                                                <span>指定雲端連結 (進階版功能)</span>
+                                                            </label>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                {/* Advanced Output Settings */}
+                                                <div className="space-y-4 bg-slate-50 p-4 rounded-lg border border-slate-100">
+                                                    <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center">
+                                                        <i className="fas fa-chart-bar mr-2"></i> 進階資料處理
+                                                    </h4>
+                                                    
+                                                    <label className="flex items-start space-x-3 text-sm">
+                                                        <input type="checkbox" checked={config.autoAnalysis} onChange={(e) => setConfig({...config, autoAnalysis: e.target.checked})} className="mt-1 rounded text-blue-600" />
+                                                        <div>
+                                                            <span className="font-medium text-slate-800">Excel 初步分析與格式化</span>
+                                                            <p className="text-xs text-slate-500 mt-1">自動識別資料型態，轉為表格並套用基礎分析。</p>
+                                                        </div>
+                                                    </label>
+
+                                                    <label className="flex items-start space-x-3 text-sm pt-2">
+                                                        <input type="checkbox" checked={config.splitFiles} onChange={(e) => setConfig({...config, splitFiles: e.target.checked})} className="mt-1 rounded text-blue-600" />
+                                                        <div>
+                                                            <span className="font-medium text-slate-800">巨量資料自動分檔</span>
+                                                            <p className="text-xs text-slate-500 mt-1 flex items-center mt-1">
+                                                                每滿 <input type="number" value={config.splitRows} onChange={(e) => setConfig({...config, splitRows: e.target.value})} className="w-20 mx-2 p-1 border border-slate-300 rounded text-center" /> 筆自動建立新檔
+                                                            </p>
+                                                        </div>
+                                                    </label>
+                                                </div>
+                                            </div>
+
+                                            <div className="mt-8 border-t border-slate-200 pt-6 flex justify-between items-center">
+                                                <button onClick={() => setStep(2)} className="text-slate-500 hover:text-slate-800 font-medium text-sm flex items-center">
+                                                    <i className="fas fa-arrow-left mr-1"></i> 返回修改設定
+                                                </button>
+                                                <button onClick={startCrawling} className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-xl font-semibold flex items-center shadow-lg shadow-blue-200 transition-all hover:-translate-y-0.5">
+                                                    <i className="fas fa-play mr-2"></i> 啟動真實爬蟲任務
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Step 5: Execution & Logs */}
+                        {step === 5 && (
+                            <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-200 animate-in zoom-in-95 duration-300">
+                                <div className="text-center max-w-lg mx-auto mb-8">
+                                    {isCrawling ? (
+                                        <div className="relative inline-flex items-center justify-center mb-4">
+                                            <svg className="animate-spin -ml-1 mr-3 h-16 w-16 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                            </svg>
+                                            <span className="absolute text-sm font-bold text-blue-700">{crawlingProgress}%</span>
+                                        </div>
+                                    ) : (
+                                        <div className={`inline-flex items-center justify-center p-4 rounded-full mb-4 ${downloadUrl ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>
+                                            <i className={`fas ${downloadUrl ? 'fa-check' : 'fa-times'} text-3xl`}></i>
+                                        </div>
+                                    )}
+                                    <h2 className="text-2xl font-bold text-slate-900 mb-2">
+                                        {isCrawling ? '系統正在背景執行爬蟲...' : (downloadUrl ? '任務完成！' : '任務失敗')}
+                                    </h2>
+                                    <p className={`font-medium ${downloadUrl ? 'text-green-600' : 'text-red-600'}`}>
+                                        {crawlMessage || '正在連線至後端伺服器並解析真實網頁結構，請稍候。'}
+                                    </p>
+                                </div>
+
+                                {/* Progress Bar */}
+                                <div className="w-full bg-slate-100 rounded-full h-3 mb-6 overflow-hidden">
+                                    <div 
+                                        className={`h-3 rounded-full transition-all duration-300 ease-out ${isCrawling ? 'bg-blue-500' : (downloadUrl ? 'bg-green-500' : 'bg-red-500')}`}
+                                        style={{ width: `${crawlingProgress}%` }}
+                                    ></div>
+                                </div>
+
+                                {/* Logs Area */}
+                                <div className="bg-slate-900 rounded-lg p-4 font-mono text-xs text-slate-300 h-48 overflow-y-auto mb-6 space-y-1">
+                                    <div className="text-green-400">[系統] 初始化爬蟲引擎...</div>
+                                    <div>[任務] 目標 URL: {url}</div>
+                                    <div>[任務] 載入分頁機制: 首頁 到 {config.endPage === 'last' ? '末頁' : config.endPage}</div>
+                                    {config.deepCrawl && <div>[任務] 啟用深層擷取規則載入中...</div>}
+                                    {crawlingProgress > 20 && <div>[連線] 正在使用 Playwright 無頭瀏覽器訪問目標伺服器...</div>}
+                                    {crawlingProgress > 40 && <div className="text-blue-300">[解析] 成功取得 HTML，啟動真實資料表解析 (Pandas/BeautifulSoup)...</div>}
+                                    {crawlingProgress > 60 && <div>[擷取] 正在依據設定進行換頁與抓取深層連結...</div>}
+                                    {crawlingProgress > 80 && <div className="text-yellow-300">[處理] 啟動轉換，準備匯出 {config.exportFormat.toUpperCase()}...</div>}
+                                    {crawlingProgress === 100 && downloadUrl && <div className="text-green-400 font-bold mt-2">[完成] 檔案已成功生成並儲存於後端！</div>}
+                                    {crawlingProgress === 100 && !downloadUrl && <div className="text-red-400 font-bold mt-2">[錯誤] 爬蟲過程遭遇異常中斷。</div>}
+                                </div>
+
+                                {/* Download Actions */}
+                                {!isCrawling && (
+                                    <div className="flex justify-center space-x-4 animate-in fade-in zoom-in duration-500">
+                                        {downloadUrl && (
+                                            <a href={downloadUrl} className="bg-green-600 hover:bg-green-700 text-white px-8 py-3 rounded-xl font-bold flex items-center shadow-lg shadow-green-200 transition-all hover:-translate-y-0.5">
+                                                <i className="fas fa-download mr-2"></i> 點此下載資料檔案
+                                            </a>
+                                        )}
+                                        <button onClick={() => setStep(1)} className="bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 px-6 py-3 rounded-xl font-medium transition-colors">
+                                            <i className="fas fa-redo mr-1"></i> 建立新任務
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

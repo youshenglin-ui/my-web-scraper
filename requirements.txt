@@ -1,0 +1,10 @@
+fastapi==0.110.0
+uvicorn==0.28.0
+requests==2.31.0
+beautifulsoup4==4.12.3
+pandas==2.2.1
+openpyxl==3.1.2
+lxml==5.1.0
+html5lib==1.1
+playwright==1.42.0
+nest-asyncio==1.6.0
