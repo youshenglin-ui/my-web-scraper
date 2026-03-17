@@ -3,14 +3,16 @@ from fastapi.responses import HTMLResponse, FileResponse
 import pandas as pd
 import os
 import io
+import re
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright # 改用最穩定的同步 (Sync) 模組
+from playwright.sync_api import sync_playwright # 穩定的同步模組
 
 app = FastAPI()
 os.makedirs("downloads", exist_ok=True)
 
 @app.get("/", response_class=HTMLResponse)
-def get_ui(): # 拿掉 async
+def get_ui():
     try:
         with open("index.html", "r", encoding="utf-8") as f:
             return f.read()
@@ -18,14 +20,17 @@ def get_ui(): # 拿掉 async
         return "<h1>請先建立 index.html 檔案</h1>"
 
 @app.get("/api/analyze")
-def analyze_website(url: str, limit: int = 10): # 拿掉 async
+def analyze_website(url: str, limit: int = 10):
     if not url:
         raise HTTPException(status_code=400, detail="請提供網址")
     
     try:
-        # 使用同步版本的 Playwright
+        print(f"[系統] 開始分析網址: {url}")
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            )
             page = browser.new_page()
             page.goto(url, wait_until="networkidle", timeout=30000)
             html = page.content()
@@ -53,26 +58,38 @@ def analyze_website(url: str, limit: int = 10): # 拿掉 async
             "analysisResult": {
                 "tablesFound": tables_found,
                 "listItemsFound": len(soup.find_all('tr')),
-                "paginationDetected": "下一頁" in html or ">" in html,
-                "estimatedPages": "動態取得",
+                "paginationDetected": "下一頁" in html or "›" in html or "page=" in url,
+                "estimatedPages": "支援自動/強制翻頁",
                 "detailLinksDetected": len(soup.find_all('a')) > 0
             },
             "previewData": preview_data
         }
     except Exception as e:
+        print(f"[錯誤] 分析失敗: {str(e)}")
         return {"status": "error", "message": str(e)}
 
 @app.get("/api/crawl")
-def crawl_website(url: str, pagination: str = 'false', startPage: int = 1, endPage: str = 'last', deepCrawl: str = 'false'): # 拿掉 async
+def crawl_website(url: str, pagination: str = 'false', startPage: int = 1, endPage: str = 'last', deepCrawl: str = 'false'):
     try:
         is_pagination = pagination.lower() == 'true'
         is_deep = deepCrawl.lower() == 'true'
         all_data = []
         
+        print(f"\n========== 開始爬蟲任務 ==========")
+        print(f"目標網址: {url}")
+        print(f"換頁模式: {is_pagination}, 深層擷取: {is_deep}")
+        
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            )
             page = browser.new_page()
             page.goto(url, wait_until="networkidle", timeout=30000)
+            
+            # 解析基礎網址 (供相對路徑的內頁連結使用)
+            parsed_url = urlparse(url)
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
             
             current_page = 1
             max_pages = 9 if endPage == 'last' else int(endPage) 
@@ -80,11 +97,14 @@ def crawl_website(url: str, pagination: str = 'false', startPage: int = 1, endPa
                 max_pages = 1
                 
             while current_page <= max_pages:
-                # 等待表格與畫面載入
+                print(f"[進度] 正在擷取第 {current_page} 頁...")
+                
+                # 1. 等待表格與畫面載入
                 try:
                     page.wait_for_selector("table", timeout=10000)
-                    page.wait_for_timeout(1500) # 給予 1.5 秒緩衝時間渲染
+                    page.wait_for_timeout(2000) # 給予 2 秒緩衝時間確保動態資料渲染完畢
                 except Exception:
+                    print(f"  -> 等待表格超時，嘗試直接解析畫面。")
                     pass
                 
                 html = page.content()
@@ -93,37 +113,102 @@ def crawl_website(url: str, pagination: str = 'false', startPage: int = 1, endPa
                 try:
                     dfs = pd.read_html(io.StringIO(html))
                     if dfs:
-                        df = dfs[0]
+                        # 若畫面中有多個表格，抓取行數最多的一個(通常是主資料表)
+                        df = max(dfs, key=len)
+                        print(f"  -> 第 {current_page} 頁成功取得表格，共 {len(df)} 筆主資料")
                         
-                        # 【深層擷取邏輯】
+                        # 2. 【真正進入內頁的深層擷取邏輯】
                         if is_deep:
                             links = []
                             table_node = soup.find('table')
                             if table_node:
+                                # 抓取所有的列 (略過標題行)
                                 for tr in table_node.find_all('tr')[1:]:
                                     a_tag = tr.find('a', href=True)
                                     if a_tag:
                                         href = a_tag['href']
-                                        full_url = "https://carbonfee.moenv.gov.tw" + href if href.startswith('/') else href
+                                        # 組合出完整的絕對路徑網址
+                                        full_url = href if href.startswith('http') else base_url + href if href.startswith('/') else href
                                         links.append(full_url)
                                     else:
-                                        links.append("無深層連結")
+                                        links.append("無")
                                         
+                                # 如果抓到的連結數量和表格行數對得上
                                 if len(links) == len(df):
-                                    df['【深層明細資料連結】'] = links
+                                    df['【深層明細連結】'] = links
+                                    detail_contents = []
+                                    
+                                    print(f"  -> 準備進入 {len(links)} 個內頁抓取詳細資料...")
+                                    
+                                    # 開始逐一拜訪內頁
+                                    for idx, link in enumerate(links):
+                                        if link.startswith("http"):
+                                            try:
+                                                print(f"    -> 正在抓取內頁 {idx+1}/{len(links)}: {link}")
+                                                detail_page = browser.new_page()
+                                                detail_page.goto(link, wait_until="networkidle", timeout=15000)
+                                                detail_html = detail_page.content()
+                                                
+                                                # 嘗試在內頁中找尋表格
+                                                try:
+                                                    detail_dfs = pd.read_html(io.StringIO(detail_html))
+                                                    if detail_dfs:
+                                                        # 將內頁前兩個表格轉為純文字 JSON 以利存入單一 Excel 儲存格
+                                                        detail_text = " | ".join([d.to_json(orient="records", force_ascii=False) for d in detail_dfs[:2]])
+                                                        detail_contents.append(detail_text)
+                                                        detail_page.close()
+                                                        continue
+                                                except ValueError:
+                                                    pass
+                                                    
+                                                # 如果內頁沒有表格，改抓取純文字
+                                                detail_soup = BeautifulSoup(detail_html, 'html.parser')
+                                                for script in detail_soup(["script", "style", "nav", "footer"]):
+                                                    script.extract()
+                                                text = detail_soup.get_text(separator=' ', strip=True)
+                                                detail_contents.append(text[:1500]) # 限制長度避免 Excel 爆掉
+                                                detail_page.close()
+                                            except Exception as e:
+                                                print(f"    -> 內頁擷取失敗: {str(e)}")
+                                                detail_contents.append(f"內頁擷取失敗")
+                                                if 'detail_page' in locals() and not detail_page.is_closed():
+                                                    detail_page.close()
+                                        else:
+                                            detail_contents.append("無有效連結")
+                                            
+                                    df['【內頁詳細資料 (爬蟲)】'] = detail_contents
                                     
                         all_data.append(df)
-                except Exception:
+                except Exception as e:
+                    print(f"  -> 解析表格失敗: {str(e)}")
                     pass
                 
-                # 【換頁邏輯】
+                # 3. 【強制無敵換頁邏輯】
                 if is_pagination and current_page < max_pages:
-                    next_btn = page.query_selector('a:has-text("下一頁"), a:has-text(">"), button.next, li.next a')
-                    if next_btn:
-                        next_btn.click()
-                        current_page += 1
-                    else:
-                        break # 找不到下一頁就提早結束
+                    current_url = page.url
+                    next_clicked = False
+                    
+                    # 方案 A: 尋找畫面上的下一頁按鈕
+                    try:
+                        next_btn = page.locator('a.page-link:has-text("›"), a:has-text("下一頁"), a:has-text(">"), li.next a').first
+                        if next_btn.is_visible(timeout=2000):
+                            next_btn.click()
+                            page.wait_for_timeout(3000)
+                            current_page += 1
+                            next_clicked = True
+                    except Exception:
+                        pass
+                        
+                    # 方案 B: (備用方案) 如果網址裡有 page=1，直接改網址強制跳頁
+                    if not next_clicked:
+                        if "page=" in current_url:
+                            current_page += 1
+                            new_url = re.sub(r'page=\d+', f'page={current_page}', current_url)
+                            print(f"  -> 找不到按鈕，強制更換網址至下一頁: {new_url}")
+                            page.goto(new_url, wait_until="networkidle", timeout=30000)
+                        else:
+                            print("  -> 已經無法翻頁，結束爬蟲。")
+                            break # 真的無路可走才結束
                 else:
                     break
 
@@ -134,14 +219,15 @@ def crawl_website(url: str, pagination: str = 'false', startPage: int = 1, endPa
             file_path = "downloads/result.xlsx"
             final_df.to_excel(file_path, index=False, engine='openpyxl')
             
-            msg = f"成功擷取 {current_page} 頁，共 {len(final_df)} 筆資料！"
-            if is_deep: msg += " (已包含深層資料連結)"
-                
+            msg = f"成功擷取 {current_page} 頁，共 {len(final_df)} 筆主資料！"
+            if is_deep: msg += " (已包含進入內頁抓取的詳細數據)"
+            print(f"========== 任務完成: {msg} ==========\n")
             return {"status": "success", "message": msg, "download_url": "/api/download"}
         else:
             return {"status": "error", "message": "無法解析表格。"}
             
     except Exception as e:
+        print(f"[嚴重錯誤] 爬蟲發生異常: {str(e)}")
         return {"status": "error", "message": f"爬蟲發生錯誤: {str(e)}"}
 
 @app.get("/api/download")
