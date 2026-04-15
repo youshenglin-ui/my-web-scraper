@@ -1,5 +1,5 @@
-# 使用輕量級的 Python 3.12 映像檔
-FROM python:3.12-slim
+# 指定使用穩定版的 Debian 12 (bookworm)，避免最新系統造成 Playwright 相依性衝突
+FROM python:3.12-slim-bookworm
 
 # 設定工作目錄
 WORKDIR /app
