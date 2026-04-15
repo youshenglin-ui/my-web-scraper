@@ -3,476 +3,428 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>進階網頁資料爬蟲系統</title>
+    <title>進階網頁資料爬蟲系統 (自動排程與通用版)</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- FontAwesome Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <!-- React & ReactDOM (透過 CDN 引入) -->
+    <!-- React & ReactDOM -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <!-- Babel (讓瀏覽器可以直接解析 React 的 JSX 語法) -->
+    <!-- Babel -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 </head>
 <body class="bg-slate-50 text-slate-800 font-sans">
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect } = React;
+        const { useState, useEffect, useRef } = React;
 
         const App = () => {
+            const [activeTab, setActiveTab] = useState('single'); // 'single', 'schedule', 'custom'
+            
+            // --- 通用規則狀態 (放在最上層，確保單次和排程都能讀到) ---
+            const [customRule, setCustomRule] = useState(
+                JSON.stringify({ "tableSelector": "table", "rowSelector": "tr", "paginationSelector": "a.next" }, null, 2)
+            );
+            const [useCustomRule, setUseCustomRule] = useState(false); // 控制單次爬蟲是否啟用通用規則
+
+            // --- 單次爬蟲狀態 ---
             const [step, setStep] = useState(1);
             const [url, setUrl] = useState('');
             const [isAnalyzing, setIsAnalyzing] = useState(false);
             const [analysisResult, setAnalysisResult] = useState(null);
-            const [showDeployModal, setShowDeployModal] = useState(false); // 部署教學 Modal
-            
-            // 動態預覽資料與欄位
             const [previewData, setPreviewData] = useState([]);
             const [previewColumns, setPreviewColumns] = useState([]);
-            
-            // 爬蟲設定狀態
             const [config, setConfig] = useState({
-                pagination: true,
-                startPage: 1,
-                endPage: 'last',
-                customEndPage: 9, 
-                deepCrawl: true,
-                deepCrawlLevel: 1,
-                exportFormat: 'excel',
-                exportDestination: 'local',
-                cloudUrl: '',
-                splitFiles: true,
-                splitRows: 50000,
-                autoAnalysis: true,
-                carbonAnalysis: true // 新增：碳減量技術專項分析
+                pagination: true, startPage: 1, endPage: 'last', customEndPage: 9, deepCrawl: true, carbonAnalysis: true 
             });
+            const [crawlingProgress, setCrawlingProgress] = useState(0);
+            const [isCrawling, setIsCrawling] = useState(false);
+            const [downloadUrl, setDownloadUrl] = useState('');
+            const [crawlMessage, setCrawlMessage] = useState('');
+            const pollIntervalRef = useRef(null);
 
+            // --- 排程中心狀態 ---
+            const [schedules, setSchedules] = useState([]);
+            const [logs, setLogs] = useState([]);
+            const [scheduleForm, setScheduleForm] = useState({ url: '', time: '08:00', webhookUrl: '' });
+
+            // 取得排程與日誌
+            const fetchSchedules = async () => {
+                try {
+                    const res = await fetch('/api/schedules');
+                    const data = await res.json();
+                    if (data.status === 'success') {
+                        setSchedules(data.schedules);
+                        setLogs(data.logs);
+                    }
+                } catch (e) { console.error("無法取得排程資料", e); }
+            };
+
+            useEffect(() => {
+                if (activeTab === 'schedule') {
+                    fetchSchedules();
+                }
+            }, [activeTab]);
+
+            // 單次分析
             const handleAnalyze = async () => {
                 if (!url) return;
                 setIsAnalyzing(true);
-                
                 try {
                     const response = await fetch(`/api/analyze?url=${encodeURIComponent(url)}&limit=10`);
                     const data = await response.json();
-
                     if (data.status === 'success') {
                         setAnalysisResult(data.analysisResult);
                         setPreviewData(data.previewData);
-                        if (data.previewData && data.previewData.length > 0) {
-                            setPreviewColumns(Object.keys(data.previewData[0]));
-                        } else {
-                            setPreviewColumns(['提示']);
-                            setPreviewData([{'提示': '找不到可預覽的資料'}]);
-                        }
-                    } else {
-                        throw new Error(data.message || "分析失敗");
-                    }
+                        setPreviewColumns(data.previewData.length > 0 ? Object.keys(data.previewData[0]) : ['提示']);
+                    } else throw new Error(data.message);
                 } catch (error) {
-                    console.error("分析發生錯誤:", error);
-                    alert(`無法從目標網站取得真實結構。\n原因：${error.message}\n\n這可能是因為網站使用了動態載入(JavaScript)防護。`);
-                    setAnalysisResult({
-                        tablesFound: 0,
-                        listItemsFound: 0,
-                        paginationDetected: false,
-                        estimatedPages: 0,
-                        detailLinksDetected: false,
-                        status: 'error'
-                    });
-                    setPreviewColumns(['系統訊息', '建議操作']);
-                    setPreviewData([
-                        { '系統訊息': '無法使用標準 HTTP 請求讀取資料', '建議操作': '目標網站可能為動態網頁，後端需升級為 Playwright 引擎。' }
-                    ]);
+                    alert(`分析失敗：${error.message}`);
+                    setAnalysisResult({ status: 'error' });
                 } finally {
                     setIsAnalyzing(false);
                     setStep(2);
                 }
             };
 
-            const handleDeepCrawlPreview = () => {
-                setConfig(prev => ({...prev, deepCrawl: true}));
-                alert("✅ 已自動為您啟用「進階內頁爬蟲」！\n\n執行爬蟲任務時，系統將會自動擷取表格背後的隱藏連結（例如：明細資料）並匯出。");
-            };
-
-            const [crawlingProgress, setCrawlingProgress] = useState(0);
-            const [isCrawling, setIsCrawling] = useState(false);
-            const [downloadUrl, setDownloadUrl] = useState('');
-            const [crawlMessage, setCrawlMessage] = useState('');
-            const [isTimeout, setIsTimeout] = useState(false);
-
+            // 啟動單次爬蟲
             const startCrawling = async () => {
                 setStep(5);
                 setIsCrawling(true);
                 setCrawlingProgress(0);
                 setDownloadUrl('');
-                setCrawlMessage('');
-                setIsTimeout(false);
-                
-                const progressInterval = setInterval(() => {
-                    setCrawlingProgress(prev => {
-                        if (prev >= 90) {
-                            clearInterval(progressInterval);
-                            return 90;
-                        }
-                        return prev + Math.floor(Math.random() * 5);
-                    });
-                }, 1500);
-
+                setCrawlMessage('正在建立任務...');
                 try {
                     const actualEndPage = config.endPage === 'custom' ? config.customEndPage : config.endPage;
-                    
                     const queryParams = new URLSearchParams({
-                        url: url,
-                        pagination: config.pagination,
-                        startPage: config.startPage,
-                        endPage: actualEndPage,
-                        deepCrawl: config.deepCrawl,
-                        carbonAnalysis: config.carbonAnalysis // 傳遞分析參數
+                        url, pagination: config.pagination, startPage: config.startPage, 
+                        endPage: actualEndPage, deepCrawl: config.deepCrawl, carbonAnalysis: config.carbonAnalysis,
+                        customRule: useCustomRule ? customRule : "{}" // 關鍵：根據勾選狀態發送規則
                     });
-
                     const response = await fetch(`/api/crawl?${queryParams.toString()}`);
                     const data = await response.json();
 
-                    clearInterval(progressInterval);
-                    setCrawlingProgress(100);
-
-                    if (data.status === "success") {
-                        setCrawlMessage(data.message);
-                        setDownloadUrl(data.download_url);
-                    } else {
-                        setCrawlMessage("❌ 擷取失敗：" + data.message);
-                    }
+                    if (data.status === "success" && data.task_id) {
+                        pollIntervalRef.current = setInterval(async () => {
+                            try {
+                                const statusRes = await fetch(`/api/crawl/status/${data.task_id}`);
+                                const statusData = await statusRes.json();
+                                setCrawlingProgress(statusData.progress || 0);
+                                setCrawlMessage(statusData.message || '處理中...');
+                                if (statusData.status === 'success' || statusData.status === 'error') {
+                                    clearInterval(pollIntervalRef.current);
+                                    setIsCrawling(false);
+                                    if (statusData.status === 'success') setDownloadUrl(statusData.download_url);
+                                    else setCrawlMessage("❌ 失敗：" + statusData.message);
+                                }
+                            } catch (err) {}
+                        }, 2000);
+                    } else throw new Error(data.message);
                 } catch (error) {
-                    clearInterval(progressInterval);
-                    setCrawlingProgress(100);
-                    setIsTimeout(true);
-                    setCrawlMessage("⚠️ 網頁連線逾時 (Timeout)。因為資料量龐大，網頁等待過久而中斷。但請別擔心，後端爬蟲程式【仍在背景執行中】！請觀察下方終端機，若顯示「任務完成」，請直接點擊下方強制下載按鈕。");
-                    setDownloadUrl("/api/download");
-                } finally {
                     setIsCrawling(false);
+                    setCrawlMessage("⚠️ 啟動失敗：" + error.message);
                 }
             };
 
+            // 新增排程
+            const handleAddSchedule = async (e) => {
+                e.preventDefault();
+                try {
+                    const res = await fetch('/api/schedule/add', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            url: scheduleForm.url, 
+                            cron_time: scheduleForm.time, 
+                            webhook_url: scheduleForm.webhookUrl,
+                            custom_rule: useCustomRule ? customRule : "{}" // 關鍵：根據勾選狀態發送規則
+                        })
+                    });
+                    const data = await res.json();
+                    if (data.status === 'success') {
+                        alert('✅ 排程建立成功！');
+                        setScheduleForm({ url: '', time: '08:00', webhookUrl: '' });
+                        fetchSchedules();
+                    } else alert('建立失敗: ' + data.message);
+                } catch (err) { alert('連線錯誤'); }
+            };
+
+            // 刪除排程
+            const handleDeleteSchedule = async (id) => {
+                if(!confirm('確定要刪除此排程嗎？')) return;
+                try {
+                    await fetch(`/api/schedule/${id}`, { method: 'DELETE' });
+                    fetchSchedules();
+                } catch (err) { alert('刪除失敗'); }
+            };
+
+            useEffect(() => { return () => { if (pollIntervalRef.current) clearInterval(pollIntervalRef.current); }; }, []);
+
             return (
-                <div className="min-h-screen bg-slate-50 text-slate-800 font-sans p-6 relative">
-                    <div className="max-w-5xl mx-auto space-y-6">
-                        
-                        <header className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex items-center justify-between">
-                            <div className="flex items-center space-x-3">
-                                <div className="p-3 bg-blue-600 text-white rounded-lg flex items-center justify-center w-12 h-12">
-                                    <i className="fas fa-database text-xl"></i>
-                                </div>
+                <div className="min-h-screen bg-slate-50 text-slate-800 font-sans pb-10">
+                    {/* Header & Tabs */}
+                    <header className="bg-slate-900 text-white shadow-md pt-6 pb-0 px-6 mb-8">
+                        <div className="max-w-6xl mx-auto">
+                            <div className="flex items-center space-x-4 mb-6">
+                                <div className="p-3 bg-blue-500 rounded-lg"><i className="fas fa-spider text-2xl"></i></div>
                                 <div>
-                                    <h1 className="text-2xl font-bold text-slate-900">進階網頁資料爬蟲系統</h1>
-                                    <p className="text-sm text-slate-500">智慧分析、深度擷取與自動化資料整理</p>
+                                    <h1 className="text-2xl font-bold">進階資料爬蟲中心</h1>
+                                    <p className="text-slate-400 text-sm">自動排程 · Webhook通知 · 自訂通用規則</p>
                                 </div>
                             </div>
-                            <div className="flex space-x-2 text-sm font-medium">
-                                <button onClick={() => setShowDeployModal(true)} className="mr-4 text-blue-600 hover:text-blue-800 flex items-center bg-blue-50 px-3 py-1 rounded-full transition-colors">
-                                    <i className="fas fa-globe mr-1"></i> 發佈為公開網址
+                            <div className="flex space-x-1">
+                                <button onClick={() => setActiveTab('single')} className={`px-6 py-3 rounded-t-lg font-medium transition-colors ${activeTab === 'single' ? 'bg-white text-blue-600' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
+                                    <i className="fas fa-play-circle mr-2"></i> 單次抓取
                                 </button>
-                                <span className={`px-3 py-1 rounded-full ${step >= 1 ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-400'}`}>1. 分析</span>
-                                <span className={`px-3 py-1 rounded-full ${step >= 2 ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-400'}`}>2. 設定</span>
-                                <span className={`px-3 py-1 rounded-full ${step >= 3 ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-400'}`}>3. 預覽</span>
-                                <span className={`px-3 py-1 rounded-full ${step >= 4 ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-400'}`}>4. 輸出</span>
+                                <button onClick={() => setActiveTab('schedule')} className={`px-6 py-3 rounded-t-lg font-medium transition-colors ${activeTab === 'schedule' ? 'bg-white text-blue-600' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
+                                    <i className="fas fa-clock mr-2"></i> 自動排程紀錄
+                                </button>
+                                <button onClick={() => setActiveTab('custom')} className={`px-6 py-3 rounded-t-lg font-medium transition-colors ${activeTab === 'custom' ? 'bg-white text-blue-600' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
+                                    <i className="fas fa-code mr-2"></i> 通用規則設定
+                                </button>
                             </div>
-                        </header>
+                        </div>
+                    </header>
 
-                        {step === 1 && (
-                            <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-200 space-y-6 animate-in fade-in slide-in-from-bottom-4">
-                                <h2 className="text-xl font-semibold flex items-center">
-                                    <i className="fas fa-search mr-3 text-blue-600"></i> 第一步：輸入目標網站與初步分析
-                                </h2>
-                                <p className="text-slate-600">系統將對網站進行即時分析，擷取真實存在的表格、清單與欄位。</p>
-                                
-                                <div className="flex space-x-4">
-                                    <input 
-                                        type="url" 
-                                        placeholder="請輸入網址 (例如: https://carbonfee.moenv.gov.tw/...)"
-                                        className="flex-1 p-4 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-lg"
-                                        value={url}
-                                        onChange={(e) => setUrl(e.target.value)}
-                                    />
-                                    <button 
-                                        onClick={handleAnalyze}
-                                        disabled={!url || isAnalyzing}
-                                        className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white px-8 py-4 rounded-lg font-medium transition-colors flex items-center text-lg shadow-md"
-                                    >
-                                        {isAnalyzing ? <i className="fas fa-sync fa-spin mr-2"></i> : <i className="fas fa-cog mr-2"></i>}
-                                        {isAnalyzing ? '實際連線分析中...' : '開始分析'}
-                                    </button>
-                                </div>
+                    <div className="max-w-6xl mx-auto px-6">
+                        {/* --- 引擎選擇切換區 (全域顯示) --- */}
+                        <div className="mb-6 bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-center justify-between">
+                            <div>
+                                <h3 className="font-bold text-blue-800"><i className="fas fa-cogs mr-2"></i> 當前爬蟲引擎模式</h3>
+                                <p className="text-sm text-blue-600 mt-1">
+                                    {useCustomRule 
+                                        ? "已啟用「通用規則引擎」：適用於抓取任意網站的標準表格。" 
+                                        : "已啟用「環保署專用引擎」：適用於碳費深層網頁與六大維度報表分析。"}
+                                </p>
                             </div>
-                        )}
+                            <label className="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" className="sr-only peer" checked={useCustomRule} onChange={(e) => setUseCustomRule(e.target.checked)} />
+                                <div className="w-14 h-7 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-6 after:w-6 after:transition-all peer-checked:bg-blue-600"></div>
+                                <span className="ml-3 text-sm font-bold text-slate-700">{useCustomRule ? '切換為環保署模式' : '切換為通用模式'}</span>
+                            </label>
+                        </div>
 
-                        {(step === 2 || step === 3 || step === 4) && analysisResult && (
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 animate-in fade-in slide-in-from-bottom-4">
-                                
-                                <div className="col-span-1 space-y-6">
-                                    <div className={`bg-white p-5 rounded-xl shadow-sm border ${analysisResult.status === 'success' ? 'border-green-200' : 'border-red-200'}`}>
-                                        <h3 className={`font-semibold mb-4 flex items-center ${analysisResult.status === 'success' ? 'text-green-700' : 'text-red-700'}`}>
-                                            <i className={`fas ${analysisResult.status === 'success' ? 'fa-check-circle' : 'fa-exclamation-triangle'} mr-2`}></i> 
-                                            {analysisResult.status === 'success' ? '初步分析完成' : '分析發生異常'}
-                                        </h3>
-                                        <ul className="space-y-3 text-sm text-slate-600">
-                                            <li className="flex justify-between border-b pb-2"><span>主要表格/區塊：</span> <span className="font-semibold">{analysisResult.tablesFound} 個</span></li>
-                                            <li className="flex justify-between border-b pb-2"><span>發現資料標籤：</span> <span className="font-semibold">約 {analysisResult.listItemsFound} 筆</span></li>
-                                            <li className="flex justify-between border-b pb-2">
-                                                <span>支援自動換頁：</span> 
-                                                <span className={`font-semibold ${analysisResult.paginationDetected ? 'text-green-600' : 'text-orange-500'}`}>
-                                                    {analysisResult.paginationDetected ? `是 (自動偵測)` : '需手動調整'}
-                                                </span>
-                                            </li>
-                                            <li className="flex justify-between">
-                                                <span>支援內頁深度爬蟲：</span> 
-                                                <span className={`font-semibold ${analysisResult.detailLinksDetected ? 'text-green-600' : 'text-orange-500'}`}>
-                                                    {analysisResult.detailLinksDetected ? '是 (有連結)' : '未偵測到連結'}
-                                                </span>
-                                            </li>
-                                        </ul>
+                        {/* --- Tab 1: 單次爬蟲 --- */}
+                        {activeTab === 'single' && (
+                            <div className="space-y-6 animate-in fade-in duration-300">
+                                {step === 1 && (
+                                    <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-200">
+                                        <h2 className="text-xl font-semibold mb-4"><i className="fas fa-search text-blue-600 mr-2"></i> 目標網址</h2>
+                                        <div className="flex space-x-4">
+                                            <input type="url" placeholder="輸入要抓取的網址..." className="flex-1 p-4 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" value={url} onChange={(e) => setUrl(e.target.value)} />
+                                            <button onClick={handleAnalyze} disabled={!url || isAnalyzing} className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white px-8 py-4 rounded-lg font-medium">
+                                                {isAnalyzing ? <i className="fas fa-sync fa-spin mr-2"></i> : <i className="fas fa-bolt mr-2"></i>}
+                                                分析網頁
+                                            </button>
+                                        </div>
                                     </div>
+                                )}
 
-                                    <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200 space-y-5">
-                                        <h3 className="font-semibold text-slate-900 flex items-center">
-                                            <i className="fas fa-sliders-h mr-2"></i> 擷取規則設定
-                                        </h3>
-                                        
-                                        <div className="space-y-2">
-                                            <label className="flex items-center space-x-2 text-sm font-medium text-slate-700">
-                                                <input type="checkbox" checked={config.pagination} onChange={(e) => setConfig({...config, pagination: e.target.checked})} className="rounded text-blue-600 w-4 h-4" />
-                                                <span>自動換頁抓取 (從首頁到末頁)</span>
-                                            </label>
-                                            {config.pagination && (
-                                                <div className="flex items-center flex-wrap gap-2 ml-6 mt-2 text-sm">
-                                                    <span>從第</span>
-                                                    <input type="number" value={config.startPage} onChange={(e) => setConfig({...config, startPage: e.target.value})} className="w-16 p-1 border rounded text-center" />
-                                                    <span>頁到</span>
-                                                    <select value={config.endPage} onChange={(e) => setConfig({...config, endPage: e.target.value})} className="p-1 border rounded bg-white">
-                                                        <option value="last">最後一頁</option>
-                                                        <option value="custom">自訂頁數</option>
-                                                    </select>
+                                {(step === 2 || step === 4) && analysisResult && (
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                        <div className="col-span-1 space-y-6">
+                                            <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
+                                                <h3 className="font-semibold mb-4"><i className="fas fa-sliders-h text-blue-600 mr-2"></i> 擷取設定</h3>
+                                                <div className="space-y-3">
+                                                    <label className="flex items-center space-x-2 text-sm">
+                                                        <input type="checkbox" checked={config.pagination} onChange={(e) => setConfig({...config, pagination: e.target.checked})} className="rounded text-blue-600 w-4 h-4" />
+                                                        <span>啟用自動換頁</span>
+                                                    </label>
+                                                    {config.pagination && (
+                                                        <div className="flex items-center gap-2 ml-6 text-sm">
+                                                            <span>至第</span>
+                                                            <select value={config.endPage} onChange={(e) => setConfig({...config, endPage: e.target.value})} className="p-1 border rounded">
+                                                                <option value="last">末頁</option>
+                                                                <option value="custom">自訂</option>
+                                                            </select>
+                                                            {config.endPage === 'custom' && <input type="number" value={config.customEndPage} onChange={(e) => setConfig({...config, customEndPage: e.target.value})} className="w-16 p-1 border rounded" />}
+                                                        </div>
+                                                    )}
                                                     
-                                                    {config.endPage === 'custom' && (
-                                                        <input 
-                                                            type="number" 
-                                                            min="1" 
-                                                            value={config.customEndPage} 
-                                                            onChange={(e) => setConfig({...config, customEndPage: e.target.value})} 
-                                                            className="w-16 p-1 border border-blue-400 rounded text-center focus:ring-2 focus:ring-blue-500 outline-none shadow-sm"
-                                                            title="請輸入您要抓取到第幾頁"
-                                                        />
+                                                    {!useCustomRule && (
+                                                        <label className="flex items-center space-x-2 text-sm pt-2">
+                                                            <input type="checkbox" checked={config.deepCrawl} onChange={(e) => setConfig({...config, deepCrawl: e.target.checked})} className="rounded text-blue-600 w-4 h-4" />
+                                                            <span>深層內頁追蹤 (環保署專用)</span>
+                                                        </label>
                                                     )}
                                                 </div>
+                                            </div>
+                                        </div>
+                                        <div className="col-span-1 md:col-span-2 bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                                            <div className="flex justify-between items-center mb-4 border-b pb-4">
+                                                <h3 className="text-lg font-semibold"><i className="fas fa-eye text-blue-600 mr-2"></i> 資料預覽</h3>
+                                                <button onClick={startCrawling} className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg font-semibold flex items-center shadow-lg transition-transform hover:scale-105">
+                                                    <i className="fas fa-play mr-2"></i> 立即啟動任務
+                                                </button>
+                                            </div>
+                                            <div className="overflow-x-auto rounded border border-slate-200 max-h-64">
+                                                <table className="w-full text-sm text-left whitespace-nowrap">
+                                                    <thead className="bg-slate-50 border-b">
+                                                        <tr>{previewColumns.map((col, idx) => <th key={idx} className="px-4 py-2">{col}</th>)}</tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {previewData.map((row, rowIdx) => (
+                                                            <tr key={rowIdx} className="border-b">{previewColumns.map((col, colIdx) => <td key={colIdx} className="px-4 py-2 truncate max-w-xs">{row[col]}</td>)}</tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {step === 5 && (
+                                    <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-200 text-center">
+                                        <div className="mb-6">
+                                            {isCrawling ? (
+                                                <div className="relative inline-flex items-center justify-center">
+                                                    <svg className="animate-spin h-16 w-16 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                                    </svg>
+                                                    <span className="absolute text-sm font-bold text-blue-700">{crawlingProgress}%</span>
+                                                </div>
+                                            ) : (
+                                                <i className={`fas ${downloadUrl ? 'fa-check-circle text-green-500' : 'fa-times-circle text-red-500'} text-6xl`}></i>
                                             )}
                                         </div>
-
-                                        <div className="space-y-2 pt-3 border-t">
-                                            <label className="flex items-center space-x-2 text-sm font-medium text-slate-700">
-                                                <input type="checkbox" checked={config.deepCrawl} onChange={(e) => setConfig({...config, deepCrawl: e.target.checked})} className="rounded text-blue-600 w-4 h-4" />
-                                                <span>啟用進階內頁爬蟲 (點擊進入)</span>
-                                            </label>
+                                        <h2 className="text-2xl font-bold mb-2">{isCrawling ? '爬蟲背景執行中...' : (downloadUrl ? '任務完成！' : '任務失敗')}</h2>
+                                        <div className="w-full bg-slate-100 rounded-full h-3 mb-6 overflow-hidden max-w-lg mx-auto">
+                                            <div className={`h-3 rounded-full transition-all duration-300 ${isCrawling ? 'bg-blue-500' : (downloadUrl ? 'bg-green-500' : 'bg-red-500')}`} style={{ width: `${crawlingProgress}%` }}></div>
                                         </div>
-                                    </div>
-                                </div>
-
-                                <div className="col-span-1 md:col-span-2 space-y-6">
-                                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                                        <div className="flex justify-between items-center mb-4">
-                                            <h3 className="text-lg font-semibold flex items-center">
-                                                <i className="fas fa-table mr-2 text-blue-600"></i> 真實資料結構預覽 (前 10 筆)
-                                            </h3>
-                                        </div>
-                                        
-                                        <div className="overflow-x-auto rounded-lg border border-slate-200 max-h-96">
-                                            <table className="w-full text-sm text-left whitespace-nowrap">
-                                                <thead className="bg-slate-50 text-slate-700 font-medium border-b border-slate-200 sticky top-0">
-                                                    <tr>
-                                                        {previewColumns.map((col, idx) => (
-                                                            <th key={idx} className="px-4 py-3">{col}</th>
-                                                        ))}
-                                                    </tr>
-                                                </thead>
-                                                <tbody className="divide-y divide-slate-100">
-                                                    {previewData.map((row, rowIdx) => (
-                                                        <tr key={rowIdx} className="hover:bg-slate-50">
-                                                            {previewColumns.map((col, colIdx) => (
-                                                                <td key={colIdx} className="px-4 py-3 max-w-xs truncate" title={row[col]}>
-                                                                    {row[col]}
-                                                                </td>
-                                                            ))}
-                                                        </tr>
-                                                    ))}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                        {step === 2 && (
-                                            <div className="mt-6 flex justify-end">
-                                                <button onClick={() => setStep(4)} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg flex items-center transition-colors font-medium">
-                                                    確認結構並設定輸出 <i className="fas fa-chevron-right ml-2 text-sm"></i>
-                                                </button>
+                                        <p className="text-slate-600 mb-6 font-mono text-sm">{crawlMessage}</p>
+                                        {!isCrawling && (
+                                            <div className="flex justify-center space-x-4">
+                                                {downloadUrl && <a href={downloadUrl} className="bg-green-600 hover:bg-green-700 text-white px-8 py-3 rounded-lg font-bold"><i className="fas fa-download mr-2"></i> 下載檔案</a>}
+                                                <button onClick={() => setStep(1)} className="bg-slate-200 hover:bg-slate-300 px-6 py-3 rounded-lg font-medium">建立新任務</button>
                                             </div>
                                         )}
-                                    </div>
-
-                                    {step >= 4 && (
-                                        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 animate-in fade-in slide-in-from-bottom-4">
-                                            <h3 className="text-lg font-semibold flex items-center mb-6">
-                                                <i className="fas fa-file-export mr-2 text-green-600"></i> 資料格式與輸出設定
-                                            </h3>
-                                            
-                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                                <div className="space-y-4">
-                                                    <label className="block text-sm font-medium text-slate-700 mb-1">匯出格式</label>
-                                                    <div className="flex space-x-3">
-                                                        <button onClick={() => setConfig({...config, exportFormat: 'excel'})} className={`flex-1 flex flex-col items-center p-3 rounded-lg border ${config.exportFormat === 'excel' ? 'border-green-500 bg-green-50 text-green-700 shadow-sm' : 'border-slate-200 hover:bg-slate-50'}`}>
-                                                            <i className="fas fa-file-excel text-2xl mb-2"></i>
-                                                            <span className="text-sm font-medium">Excel</span>
-                                                        </button>
-                                                        <button onClick={() => setConfig({...config, exportFormat: 'csv'})} className={`flex-1 flex flex-col items-center p-3 rounded-lg border ${config.exportFormat === 'csv' ? 'border-blue-500 bg-blue-50 text-blue-700 shadow-sm' : 'border-slate-200 hover:bg-slate-50'}`}>
-                                                            <i className="fas fa-file-csv text-2xl mb-2"></i>
-                                                            <span className="text-sm font-medium">CSV (Tab)</span>
-                                                        </button>
-                                                    </div>
-
-                                                    <div className="pt-2">
-                                                        <label className="block text-sm font-medium text-slate-700 mb-2">儲存位置</label>
-                                                        <div className="space-y-2">
-                                                            <label className="flex items-center space-x-2 text-sm cursor-pointer">
-                                                                <input type="radio" name="dest" checked={config.exportDestination === 'local'} onChange={() => setConfig({...config, exportDestination: 'local'})} className="text-blue-600 w-4 h-4" />
-                                                                <span>本地資料夾 (產生下載連結)</span>
-                                                            </label>
-                                                        </div>
-                                                    </div>
-                                                </div>
-
-                                                <div className="space-y-4 bg-slate-50 p-4 rounded-lg border border-slate-100">
-                                                    <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center">
-                                                        <i className="fas fa-chart-bar mr-2"></i> 進階資料處理與分析
-                                                    </h4>
-                                                    
-                                                    {/* 全新功能：碳減量技術自動分析 */}
-                                                    <label className="flex items-start space-x-3 text-sm pt-1">
-                                                        <input type="checkbox" checked={config.carbonAnalysis} onChange={(e) => setConfig({...config, carbonAnalysis: e.target.checked})} className="mt-1 rounded text-blue-600 w-4 h-4" />
-                                                        <div>
-                                                            <span className="font-bold text-green-700 bg-green-100 px-2 py-0.5 rounded text-xs mr-2">NEW</span>
-                                                            <span className="font-medium text-slate-800">自動彙整碳減量技術分析</span>
-                                                            <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                                                                系統會自動分析內頁的減量措施，並在匯出的 Excel 中額外建立<b>「技術分析彙整」分頁</b>。統計各年度企業採用「提升能源效率」、「使用再生能源」等技術的家數，方便您匯入 Google Sheets 直接產生圖表。
-                                                            </p>
-                                                        </div>
-                                                    </label>
-                                                </div>
-                                            </div>
-
-                                            <div className="mt-8 border-t border-slate-200 pt-6 flex justify-between items-center">
-                                                <button onClick={() => setStep(2)} className="text-slate-500 hover:text-slate-800 font-medium text-sm flex items-center">
-                                                    <i className="fas fa-arrow-left mr-1"></i> 返回修改設定
-                                                </button>
-                                                <button onClick={startCrawling} className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-xl font-semibold flex items-center shadow-lg shadow-blue-200 transition-all hover:-translate-y-0.5">
-                                                    <i className="fas fa-play mr-2"></i> 啟動真實爬蟲任務
-                                                </button>
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                        )}
-
-                        {step === 5 && (
-                            <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-200 animate-in zoom-in-95 duration-300">
-                                <div className="text-center max-w-lg mx-auto mb-8">
-                                    {isCrawling ? (
-                                        <div className="relative inline-flex items-center justify-center mb-4">
-                                            <svg className="animate-spin -ml-1 mr-3 h-16 w-16 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                            </svg>
-                                            <span className="absolute text-sm font-bold text-blue-700">{crawlingProgress}%</span>
-                                        </div>
-                                    ) : (
-                                        <div className={`inline-flex items-center justify-center p-4 rounded-full mb-4 ${downloadUrl && !isTimeout ? 'bg-green-100 text-green-600' : 'bg-yellow-100 text-yellow-600'}`}>
-                                            <i className={`fas ${downloadUrl && !isTimeout ? 'fa-check' : 'fa-exclamation-triangle'} text-3xl`}></i>
-                                        </div>
-                                    )}
-                                    <h2 className="text-2xl font-bold text-slate-900 mb-2">
-                                        {isCrawling ? '系統正在背景執行爬蟲...' : (downloadUrl && !isTimeout ? '任務完成！' : (isTimeout ? '連線逾時保護' : '任務失敗'))}
-                                    </h2>
-                                    <p className={`font-medium ${downloadUrl && !isTimeout ? 'text-green-600' : (isTimeout ? 'text-yellow-600' : 'text-red-600')}`}>
-                                        {crawlMessage || '正在連線至後端伺服器並解析真實網頁結構，請稍候。'}
-                                    </p>
-                                </div>
-
-                                <div className="w-full bg-slate-100 rounded-full h-3 mb-6 overflow-hidden">
-                                    <div 
-                                        className={`h-3 rounded-full transition-all duration-300 ease-out ${isCrawling ? 'bg-blue-500' : (downloadUrl && !isTimeout ? 'bg-green-500' : 'bg-yellow-500')}`}
-                                        style={{ width: `${crawlingProgress}%` }}
-                                    ></div>
-                                </div>
-
-                                {/* Logs Area */}
-                                <div className="bg-slate-900 rounded-lg p-4 font-mono text-xs text-slate-300 h-48 overflow-y-auto mb-6 space-y-1">
-                                    <div className="text-green-400">[系統] 初始化爬蟲引擎...</div>
-                                    <div>[任務] 目標 URL: {url}</div>
-                                    <div>[任務] 載入分頁機制: 首頁 到 {config.endPage === 'last' ? '末頁' : (config.endPage === 'custom' ? config.customEndPage : config.endPage)}</div>
-                                    {config.deepCrawl && <div>[任務] 啟用深層擷取規則，預計處理時間將延長...</div>}
-                                    {config.carbonAnalysis && <div className="text-blue-300">[任務] 啟用「碳減量技術分析」模組...</div>}
-                                    {crawlingProgress > 20 && <div>[連線] 正在使用 Playwright 無頭瀏覽器訪問目標伺服器...</div>}
-                                    {crawlingProgress > 40 && <div className="text-blue-300">[解析] 啟動真實資料表解析與自動翻頁機制...</div>}
-                                    {crawlingProgress > 60 && <div>[擷取] 正在背景抓取深層連結內容，請隨時觀察下方終端機...</div>}
-                                    {crawlingProgress > 80 && <div className="text-yellow-300">[處理] 如果資料量龐大，網頁可能會逾時，但後端不會中斷...</div>}
-                                    {crawlingProgress === 100 && downloadUrl && !isTimeout && <div className="text-green-400 font-bold mt-2">[完成] 檔案已成功生成並儲存於後端！</div>}
-                                    {crawlingProgress === 100 && isTimeout && <div className="text-yellow-400 font-bold mt-2">[注意] 網頁連線已中斷，請以「終端機」的完成訊息為準。</div>}
-                                </div>
-
-                                {!isCrawling && (
-                                    <div className="flex justify-center space-x-4 animate-in fade-in zoom-in duration-500">
-                                        {downloadUrl && (
-                                            <a href={downloadUrl} className={`${isTimeout ? 'bg-yellow-600 hover:bg-yellow-700 shadow-yellow-200' : 'bg-green-600 hover:bg-green-700 shadow-green-200'} text-white px-8 py-3 rounded-xl font-bold flex items-center shadow-lg transition-all hover:-translate-y-0.5`}>
-                                                <i className="fas fa-download mr-2"></i> {isTimeout ? '強制下載檔案 (請確保終端機已完成)' : '點此下載資料檔案'}
-                                            </a>
-                                        )}
-                                        <button onClick={() => setStep(1)} className="bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 px-6 py-3 rounded-xl font-medium transition-colors">
-                                            <i className="fas fa-redo mr-1"></i> 建立新任務
-                                        </button>
                                     </div>
                                 )}
                             </div>
                         )}
 
-                        {/* 部署分享 Modal */}
-                        {showDeployModal && (
-                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4 animate-in fade-in">
-                                <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full p-8 relative">
-                                    <button onClick={() => setShowDeployModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600">
-                                        <i className="fas fa-times text-xl"></i>
-                                    </button>
-                                    <h2 className="text-2xl font-bold text-slate-900 mb-2 flex items-center">
-                                        <i className="fas fa-rocket text-blue-600 mr-3"></i> 將系統發佈為公開網址
-                                    </h2>
-                                    <p className="text-slate-600 mb-6">GitHub Codespaces 關閉後就會休眠。若要讓所有人都能透過網址使用這個工具，您需要將 GitHub 上的程式碼「部署 (Deploy)」到免費的雲端主機上。</p>
-                                    
-                                    <div className="space-y-4">
-                                        <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
-                                            <h4 className="font-bold text-slate-800 mb-2">🚀 推薦使用 Render.com (完全免費)</h4>
-                                            <ol className="list-decimal list-inside text-sm text-slate-700 space-y-2">
-                                                <li>在 Codespaces 左側的「原始檔控制」，將目前的程式碼<b>提交 (Commit) 並推播 (Sync)</b> 到您的 GitHub。</li>
-                                                <li>前往 <a href="https://render.com" target="_blank" className="text-blue-600 underline font-medium">Render.com</a> 註冊帳號 (用 GitHub 登入)。</li>
-                                                <li>點擊右上角 <b>New +</b> -> 選擇 <b>Web Service</b>。</li>
-                                                <li>選擇 <b>Build and deploy from a Git repository</b>，並綁定您剛剛建立的 GitHub 倉庫 (my-web-scraper)。</li>
-                                                <li>在設定頁面，將 <b>Start Command</b> 填入：<code className="bg-slate-200 px-1 rounded mx-1 text-red-600">uvicorn main:app --host 0.0.0.0 --port 10000</code></li>
-                                                <li>點擊 Deploy，等待約 3 分鐘，Render 就會給您一個永久公開的網址了！</li>
-                                            </ol>
-                                        </div>
+                        {/* --- Tab 2: 排程中心 --- */}
+                        {activeTab === 'schedule' && (
+                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-in fade-in duration-300">
+                                <div className="col-span-1">
+                                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 mb-6">
+                                        <h3 className="font-bold text-lg mb-4"><i className="fas fa-plus-circle text-blue-600 mr-2"></i> 新增定時排程</h3>
+                                        <form onSubmit={handleAddSchedule} className="space-y-4">
+                                            <div>
+                                                <label className="block text-sm font-medium text-slate-700 mb-1">目標網址</label>
+                                                <input type="url" required value={scheduleForm.url} onChange={e => setScheduleForm({...scheduleForm, url: e.target.value})} className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 outline-none text-sm" placeholder="https://..." />
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-medium text-slate-700 mb-1">每日執行時間 (24H)</label>
+                                                <input type="time" required value={scheduleForm.time} onChange={e => setScheduleForm({...scheduleForm, time: e.target.value})} className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 outline-none text-sm" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm font-medium text-slate-700 mb-1">
+                                                    Webhook URL (Discord / Slack) <span className="text-xs text-slate-400 font-normal">(選填)</span>
+                                                </label>
+                                                <input type="text" value={scheduleForm.webhookUrl} onChange={e => setScheduleForm({...scheduleForm, webhookUrl: e.target.value})} className="w-full p-2 border rounded focus:ring-2 focus:ring-purple-500 outline-none text-sm" placeholder="https://discord.com/api/webhooks/..." />
+                                            </div>
+                                            <button type="submit" className="w-full bg-blue-600 text-white py-2 rounded-lg font-medium hover:bg-blue-700 transition">建立排程</button>
+                                        </form>
                                     </div>
-                                    <div className="mt-8 text-right">
-                                        <button onClick={() => setShowDeployModal(false)} className="bg-slate-800 text-white px-6 py-2 rounded-lg font-medium hover:bg-slate-700 transition-colors">
-                                            我了解了
-                                        </button>
+                                </div>
+
+                                <div className="col-span-1 lg:col-span-2 space-y-6">
+                                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                                        <h3 className="font-bold text-lg mb-4"><i className="fas fa-list text-blue-600 mr-2"></i> 執行中的排程 ({schedules.length})</h3>
+                                        {schedules.length === 0 ? (
+                                            <p className="text-slate-500 text-sm py-4 text-center border border-dashed rounded-lg">尚無建立任何排程</p>
+                                        ) : (
+                                            <ul className="divide-y border rounded-lg">
+                                                {schedules.map(s => (
+                                                    <li key={s.id} className="p-4 flex justify-between items-center hover:bg-slate-50">
+                                                        <div>
+                                                            <div className="font-medium text-slate-800 truncate w-64 md:w-96" title={s.url}>{s.url}</div>
+                                                            <div className="text-sm text-slate-500 mt-1 space-x-2">
+                                                                <span className="bg-slate-200 px-2 py-0.5 rounded text-xs font-mono">每天 {s.cron_time}</span>
+                                                                <span className={`px-2 py-0.5 rounded text-xs font-bold text-white ${s.custom_rule === "{}" ? 'bg-green-500' : 'bg-blue-500'}`}>
+                                                                    {s.custom_rule === "{}" ? '環保署引擎' : '通用引擎'}
+                                                                </span>
+                                                                {s.webhook_url && <span className="text-purple-600 text-xs"><i className="fas fa-bell"></i> Webhook已啟用</span>}
+                                                            </div>
+                                                        </div>
+                                                        <button onClick={() => handleDeleteSchedule(s.id)} className="text-red-500 hover:text-red-700 p-2"><i className="fas fa-trash"></i></button>
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        )}
+                                    </div>
+
+                                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                                        <h3 className="font-bold text-lg mb-4"><i className="fas fa-history text-blue-600 mr-2"></i> 最近執行紀錄 (Logs)</h3>
+                                        <div className="overflow-x-auto rounded border border-slate-200 max-h-80">
+                                            <table className="w-full text-sm text-left">
+                                                <thead className="bg-slate-50 sticky top-0">
+                                                    <tr>
+                                                        <th className="px-4 py-2">時間</th>
+                                                        <th className="px-4 py-2">狀態</th>
+                                                        <th className="px-4 py-2">訊息</th>
+                                                        <th className="px-4 py-2">檔案</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y">
+                                                    {logs.map(log => (
+                                                        <tr key={log.id} className="hover:bg-slate-50">
+                                                            <td className="px-4 py-2 whitespace-nowrap text-slate-500">{new Date(log.executed_at).toLocaleString()}</td>
+                                                            <td className="px-4 py-2">
+                                                                <span className={`px-2 py-1 rounded text-xs font-bold ${log.status === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                                                                    {log.status.toUpperCase()}
+                                                                </span>
+                                                            </td>
+                                                            <td className="px-4 py-2 truncate max-w-[200px]" title={log.message}>{log.message}</td>
+                                                            <td className="px-4 py-2">
+                                                                {log.file_name && <a href={`/api/download/${log.file_name}`} className="text-blue-600 hover:underline"><i className="fas fa-download"></i> 下載</a>}
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
                         )}
 
+                        {/* --- Tab 3: 通用規則設定 --- */}
+                        {activeTab === 'custom' && (
+                            <div className="bg-white p-8 rounded-xl shadow-sm border border-slate-200 animate-in fade-in duration-300">
+                                <div className="flex justify-between items-center mb-6">
+                                    <div>
+                                        <h2 className="text-xl font-bold"><i className="fas fa-code text-blue-600 mr-2"></i> 通用 CSS 選擇器規則 (JSON)</h2>
+                                        <p className="text-sm text-slate-500 mt-1">當您上方切換為「通用引擎模式」時，系統將會依照下方的規則來爬取表格。</p>
+                                    </div>
+                                </div>
+                                
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div>
+                                        <textarea 
+                                            className="w-full h-80 p-4 font-mono text-sm border border-slate-300 rounded-lg bg-slate-900 text-green-400 focus:ring-2 outline-none"
+                                            value={customRule}
+                                            onChange={(e) => setCustomRule(e.target.value)}
+                                        ></textarea>
+                                    </div>
+                                    <div className="bg-slate-50 p-6 rounded-lg border border-slate-200">
+                                        <h4 className="font-bold text-slate-700 mb-3"><i className="fas fa-book-open mr-2"></i> JSON 規則撰寫指南</h4>
+                                        <ul className="space-y-3 text-sm text-slate-600 list-disc list-inside">
+                                            <li><code className="bg-slate-200 px-1 rounded">tableSelector</code>: 目標表格的 CSS (例如 `#main-table`)。</li>
+                                            <li><code className="bg-slate-200 px-1 rounded">paginationSelector</code>: 下一頁按鈕的 CSS (例如 `a.next`)。</li>
+                                        </ul>
+                                        <div className="mt-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800">
+                                            <strong>注意事項：</strong>
+                                            <p className="mt-1">通用引擎會依據您的 CSS Selector 擷取目標表格。請確認您上方的開關是否已經切換到「通用模式」。</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             );
