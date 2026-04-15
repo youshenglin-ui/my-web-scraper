@@ -53,13 +53,15 @@ init_db()
 scheduler = AsyncIOScheduler()
 TASKS: Dict[str, Dict[str, Any]] = {}
 
-# ----------------- Webhook 通知模組 (取代 LINE Notify) -----------------
+# ----------------- Webhook 通知模組 (支援 Telegram / Discord / Slack) -----------------
 def send_webhook_notify(webhook_url: str, message: str):
     if not webhook_url or not webhook_url.strip(): return
     try:
-        # 預設使用 Discord 的 JSON 格式 (content)，若為 Slack 則自動相容 (text)
+        # 預設使用 Discord 的 JSON 格式 (content)
         payload = {"content": f"🤖 [爬蟲系統通知]\n{message}"}
-        if "hooks.slack.com" in webhook_url:
+        
+        # 自動相容 Slack 與 Telegram (使用 text 欄位)
+        if "hooks.slack.com" in webhook_url or "api.telegram.org" in webhook_url:
             payload = {"text": f"🤖 [爬蟲系統通知]\n{message}"}
             
         requests.post(webhook_url, json=payload, timeout=5)
@@ -283,12 +285,30 @@ async def core_crawler_engine(url: str, max_pages: int, is_pagination: bool, is_
             
             if is_pagination and current_page < max_pages:
                 try:
+                    next_clicked = False
                     next_btn = page.locator('a.page-link:has-text("›"), a.page-link:has-text(">"), a:has-text("下一頁"), li.next a').first
-                    if await next_btn.count() > 0 and not await next_btn.evaluate('node => node.hasAttribute("disabled")'):
-                        await next_btn.click()
-                        current_page += 1
-                    else: break
-                except Exception: break
+                    if await next_btn.count() > 0 and await next_btn.is_visible():
+                        is_disabled = await next_btn.evaluate('node => node.hasAttribute("disabled") || node.parentElement.classList.contains("disabled")')
+                        if not is_disabled:
+                            await next_btn.click()
+                            current_page += 1
+                            next_clicked = True
+                    
+                    if not next_clicked:
+                        # 備用換頁方案：直接修改 URL 參數強制跳頁
+                        current_url = page.url
+                        if "page=" in current_url:
+                            current_page += 1
+                            new_url = re.sub(r'page=\d+', f'page={current_page}', current_url)
+                            await page.goto(new_url, wait_until="domcontentloaded", timeout=30000)
+                        else:
+                            current_page += 1
+                            separator = "&" if "?" in current_url else "?"
+                            new_url = f"{current_url}{separator}page={current_page}"
+                            await page.goto(new_url, wait_until="domcontentloaded", timeout=30000)
+                except Exception as e:
+                    print(f"換頁發生錯誤: {e}")
+                    break
             else: break
         await browser.close()
     return all_data, all_pivot_records
@@ -409,12 +429,30 @@ async def universal_crawler_engine(url: str, max_pages: int, custom_rule_str: st
             
             if current_page < max_pages:
                 try:
+                    next_clicked = False
                     next_btn = page.locator(next_btn_selector).first
-                    if await next_btn.count() > 0 and not await next_btn.evaluate('node => node.hasAttribute("disabled")'):
-                        await next_btn.click()
-                        current_page += 1
-                    else: break
-                except Exception: break
+                    if await next_btn.count() > 0 and await next_btn.is_visible():
+                        is_disabled = await next_btn.evaluate('node => node.hasAttribute("disabled") || node.parentElement.classList.contains("disabled")')
+                        if not is_disabled:
+                            await next_btn.click()
+                            current_page += 1
+                            next_clicked = True
+                    
+                    if not next_clicked:
+                        # 通用引擎備用換頁方案
+                        current_url = page.url
+                        if "page=" in current_url:
+                            current_page += 1
+                            new_url = re.sub(r'page=\d+', f'page={current_page}', current_url)
+                            await page.goto(new_url, wait_until="domcontentloaded", timeout=30000)
+                        else:
+                            current_page += 1
+                            separator = "&" if "?" in current_url else "?"
+                            new_url = f"{current_url}{separator}page={current_page}"
+                            await page.goto(new_url, wait_until="domcontentloaded", timeout=30000)
+                except Exception as e:
+                    print(f"通用引擎換頁發生錯誤: {e}")
+                    break
             else: break
         await browser.close()
     return all_data
